@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_picking_form_rdl_salida_escaneo" model="ir.ui.view">
+        <field name="name">stock.picking.form.rdl_salida_escaneo</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.view_picking_form"/>
+        <field name="arch" type="xml">
+            <!-- El «oído» del lector: va fuera de las pestañas para que escuche aunque esté abierta otra pestaña.
+                 Solo existe en pantalla cuando la salida exige escaneo. -->
+            <xpath expr="//notebook" position="before">
+                <field name="rdl_exige_escaneo" invisible="1"/>
+                <field name="rdl_estado_escaneo" invisible="1"/>
+                <field name="_barcode_scanned" widget="barcode_handler" invisible="not rdl_exige_escaneo"/>
+            </xpath>
+
+            <!-- La pestaña, como primera. -->
+            <xpath expr="//notebook/page[1]" position="before">
+                <page string="Revisión por escaneo" name="rdl_revision_escaneo" invisible="not rdl_exige_escaneo">
+                    <div class="alert alert-secondary mb-2" role="status" invisible="rdl_estado_escaneo != 'sin_empezar'">
+                        <field name="rdl_letrero_escaneo" readonly="1" nolabel="1"/>
+                    </div>
+                    <div class="alert alert-warning mb-2" role="status" invisible="rdl_estado_escaneo != 'faltan'">
+                        <field name="rdl_letrero_escaneo" readonly="1" nolabel="1"/>
+                    </div>
+                    <div class="alert alert-danger mb-2" role="alert" invisible="rdl_estado_escaneo != 'sobran'">
+                        <field name="rdl_letrero_escaneo" readonly="1" nolabel="1"/>
+                    </div>
+                    <div class="alert alert-success mb-2" role="status" invisible="rdl_estado_escaneo != 'completa'">
+                        <field name="rdl_letrero_escaneo" readonly="1" nolabel="1"/>
+                    </div>
+                    <group>
+                        <field name="rdl_sku" placeholder="Escribe el SKU y presiona Enter"/>
+                    </group>
+                    <field name="rdl_linea_escaneo_ids" nolabel="1">
+                        <list editable="bottom" create="false" delete="false"
+                              decoration-success="rdl_estado == 'completo'"
+                              decoration-warning="rdl_estado == 'falta'"
+                              decoration-danger="rdl_estado == 'sobra'">
+                            <field name="product_id" readonly="1"/>
+                            <field name="rdl_codigo_sku" readonly="1"/>
+                            <field name="rdl_esperado"/>
+                            <field name="rdl_contado"/>
+                            <field name="product_uom_id" readonly="1" optional="hide"/>
+                            <field name="rdl_diferencia_texto"/>
+                            <field name="rdl_estado" column_invisible="1"/>
+                        </list>
+                    </field>
+                </page>
+            </xpath>
+        </field>
+    </record>
+</odoo>

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Grupo de la excepción para las handhelds (opción A de Charly). Se instala SIN usuarios.
+         Se le da solo al usuario de las handhelds, por la API, con el «sí, procede» de Charly y avisando antes al Almacén. -->
+    <record id="group_valida_sin_escaneo" model="res.groups">
+        <field name="name">Valida sin escaneo (handheld)</field>
+        <field name="category_id" ref="base.module_category_hidden"/>
+        <field name="comment">Quien tiene este grupo valida las salidas sin la revisión por escaneo. Solo para el usuario de las handhelds («Handheld User System»).</field>
+    </record>
+
+    <!-- Cada compañía ve solo las filas de sus salidas. -->
+    <record id="rule_rdl_salida_escaneo_linea_compania" model="ir.rule">
+        <field name="name">Revisión por escaneo: solo las compañías permitidas</field>
+        <field name="model_id" ref="model_rdl_salida_escaneo_linea"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+    </record>
+</odoo>
