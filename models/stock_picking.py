@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import logging
 from collections import defaultdict
 
 from odoo import Command, _, api, fields, models
@@ -8,6 +9,7 @@ from odoo.tools import float_compare, float_is_zero
 from .rdl_salida_escaneo_linea import cantidad_texto
 
 GRUPO_SIN_ESCANEO = "rdl_salida_escaneo.group_valida_sin_escaneo"
+_logger = logging.getLogger(__name__)
 
 
 class StockPicking(models.Model):
@@ -24,6 +26,15 @@ class StockPicking(models.Model):
     rdl_sku = fields.Char(
         string="Escribir SKU", store=False,
         help="Escribe el SKU y presiona Enter: suma 1, igual que un escaneo. Se compara en mayúsculas: encuentra el SKU aunque esté guardado con minúsculas.",
+    )
+    # 1.0.2 · Función 1: cuántos escaneos o SKU van en esta pantalla. Sube en cada intento; con eso la tabla sabe
+    # que debe llevar a la línea marcada y regresar el cursor a «Escribir SKU». Sin guardar.
+    rdl_escaneos = fields.Integer(string="Escaneos en pantalla", store=False)
+    # 1.0.2 · Función 2: la moneda de la orden de venta y el total de la revisión, sin IVA. Computados, sin guardar.
+    rdl_moneda_id = fields.Many2one("res.currency", string="Moneda de la venta", compute="_compute_rdl_moneda")
+    rdl_total_escaneo = fields.Monetary(
+        string="Total", currency_field="rdl_moneda_id", compute="_compute_rdl_total_escaneo",
+        help="Suma de los importes de la revisión por escaneo. Sin IVA.",
     )
 
     # ── Cuándo aplica ────────────────────────────────────────────────────────
@@ -91,6 +102,72 @@ class StockPicking(models.Model):
                 picking.rdl_estado_escaneo = "completa"
                 picking.rdl_letrero_escaneo = _("Completa: %s piezas revisadas. Ya puedes validar.", cantidad_texto(total))
 
+    # ── 1.0.2 · Precio, descuento, importe y total (de la orden de venta) ────
+
+    @api.depends("sale_id", "company_id")
+    def _compute_rdl_moneda(self):
+        for picking in self:
+            # sudo solo para LEER la moneda de la venta: las despachadoras pueden no tener permiso de ventas.
+            picking.rdl_moneda_id = picking.sudo().sale_id.currency_id or picking.company_id.currency_id
+
+    @api.depends("rdl_linea_escaneo_ids.rdl_importe")
+    def _compute_rdl_total_escaneo(self):
+        for picking in self:
+            picking.rdl_total_escaneo = sum(picking.rdl_linea_escaneo_ids.mapped("rdl_importe"))
+
+    @staticmethod
+    def _rdl_precio_sin_iva(linea_venta):
+        """El precio unitario del renglón de venta, sin IVA. Si sus impuestos vienen incluidos en el precio, se quitan;
+        si no, es price_unit tal cual. Solo para mostrar: si el cálculo de impuestos fallara, se usa price_unit y se
+        anota un aviso en el registro del servidor, para que la pantalla de la salida nunca se caiga por esto."""
+        # En Odoo 18 el campo es tax_id; la guarda es por si otra versión lo llama tax_ids.
+        campo = "tax_id" if "tax_id" in linea_venta._fields else "tax_ids"
+        impuestos = linea_venta[campo] if campo in linea_venta._fields else linea_venta.env["account.tax"]
+        if not impuestos or "price_include" not in impuestos._fields or not any(impuestos.mapped("price_include")):
+            return linea_venta.price_unit
+        try:
+            return impuestos.compute_all(
+                linea_venta.price_unit, currency=linea_venta.currency_id, quantity=1.0,
+                product=linea_venta.product_id, partner=linea_venta.order_id.partner_shipping_id,
+            )["total_excluded"]
+        except Exception:  # noqa: BLE001
+            _logger.warning("rdl_salida_escaneo: no se pudo quitar el IVA incluido del renglón de venta %s; "
+                            "se muestra price_unit.", linea_venta.id)
+            return linea_venta.price_unit
+
+    def _rdl_precios(self):
+        """Por producto: (precio unitario sin IVA en la unidad del producto, % descuento), de los renglones de la orden
+        de venta ligados a los movimientos de esta salida (move.sale_line_id). Si un producto viene de varios
+        renglones, promedio ponderado por la cantidad de cada movimiento, para precio y descuento. Los renglones de
+        venta se leen con sudo, SOLO para leer: aquí nunca se escribe en la venta."""
+        self.ensure_one()
+        acumulado = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0])   # peso, precio×peso, desc×peso, Σprecio, Σdesc, n
+        for move in self.move_ids:
+            if move.state == "cancel" or not move.product_id:
+                continue
+            linea_venta = move.sudo().sale_line_id
+            if not linea_venta:
+                continue
+            producto = move.product_id
+            unidad_movimiento = move.product_uom or producto.uom_id
+            peso = unidad_movimiento._compute_quantity(move.product_uom_qty, producto.uom_id, round=False)
+            unidad_venta = linea_venta.product_uom or producto.uom_id
+            precio = unidad_venta._compute_price(self._rdl_precio_sin_iva(linea_venta), producto.uom_id)
+            a = acumulado[producto]
+            a[0] += peso
+            a[1] += precio * peso
+            a[2] += linea_venta.discount * peso
+            a[3] += precio
+            a[4] += linea_venta.discount
+            a[5] += 1
+        precios = {}
+        for producto, (peso, precio_peso, desc_peso, suma_precio, suma_desc, n) in acumulado.items():
+            if peso > 0:
+                precios[producto] = (precio_peso / peso, desc_peso / peso)
+            else:                                   # cantidades en 0: promedio simple
+                precios[producto] = (suma_precio / n, suma_desc / n)
+        return precios
+
     # ── Escanear y escribir el SKU ───────────────────────────────────────────
 
     def _rdl_productos_por_codigo(self, codigo):
@@ -156,8 +233,11 @@ class StockPicking(models.Model):
         return {"warning": {"title": titulo, "message": mensaje, "type": "notification"}}
 
     def _rdl_contar(self, productos, que, es_codigo):
-        """Suma 1 al producto encontrado y regresa el aviso para la pantalla."""
+        """Suma 1 al producto encontrado y regresa el aviso para la pantalla. 1.0.2: marca su línea como la última
+        escaneada (y desmarca la anterior) y sube rdl_escaneos en cada intento, para que la tabla lleve a esa línea y
+        el cursor regrese a «Escribir SKU»."""
         self.ensure_one()
+        self.rdl_escaneos = (self.rdl_escaneos or 0) + 1
         if not productos:
             mensaje = _("%s no es de ningún producto. No se contó.", que)
             if es_codigo:
@@ -176,6 +256,9 @@ class StockPicking(models.Model):
         self._rdl_sincronizar_lineas()
         linea = self.rdl_linea_escaneo_ids.filtered(lambda l: l.product_id == producto)[:1]
         linea.rdl_contado += 1
+        for anterior in self.rdl_linea_escaneo_ids.filtered(lambda l: l.rdl_ultimo and l != linea):
+            anterior.rdl_ultimo = False
+        linea.rdl_ultimo = True
         e, c = esperado[producto], linea.rdl_contado
         cmp = float_compare(c, e, precision_rounding=producto.uom_id.rounding or 0.01)
         if cmp > 0:

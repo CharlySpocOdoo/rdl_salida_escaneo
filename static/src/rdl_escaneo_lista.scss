@@ -1,0 +1,8 @@
+// rdl_salida_escaneo 18.0.1.0.2 · Función 1: la línea del último producto escaneado se pinta de amarillo.
+// La lista le pone «text-info» por decoration-info="rdl_ultimo" (solo esa decoración usa «info» en esta tabla).
+.o_rdl_escaneo_lista {
+    .o_data_row.text-info > td {
+        background-color: #fff3b0 !important;
+        font-weight: 600;
+    }
+}

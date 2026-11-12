@@ -10,6 +10,8 @@
             <xpath expr="//notebook" position="before">
                 <field name="rdl_exige_escaneo" invisible="1"/>
                 <field name="rdl_estado_escaneo" invisible="1"/>
+                <field name="rdl_escaneos" invisible="1"/>
+                <field name="rdl_moneda_id" invisible="1"/>
                 <field name="_barcode_scanned" widget="barcode_handler" invisible="not rdl_exige_escaneo"/>
             </xpath>
 
@@ -29,10 +31,13 @@
                         <field name="rdl_letrero_escaneo" readonly="1" nolabel="1"/>
                     </div>
                     <group>
-                        <field name="rdl_sku" placeholder="Escribe el SKU y presiona Enter"/>
+                        <field name="rdl_sku" class="o_rdl_escribir_sku" placeholder="Escribe el SKU y presiona Enter"/>
                     </group>
-                    <field name="rdl_linea_escaneo_ids" nolabel="1">
-                        <list editable="bottom" create="false" delete="false"
+                    <!-- 1.0.2: widget propio (static/src/rdl_escaneo_lista.js) que lleva a la línea del último
+                         escaneado y regresa el cursor a «Escribir SKU»; limit 2000 para ver todos sin páginas. -->
+                    <field name="rdl_linea_escaneo_ids" nolabel="1" widget="rdl_escaneo_one2many" class="o_rdl_escaneo_lista">
+                        <list editable="bottom" create="false" delete="false" limit="2000"
+                              decoration-info="rdl_ultimo"
                               decoration-success="rdl_estado == 'completo'"
                               decoration-warning="rdl_estado == 'falta'"
                               decoration-danger="rdl_estado == 'sobra'">
@@ -42,9 +47,17 @@
                             <field name="rdl_contado"/>
                             <field name="product_uom_id" readonly="1" optional="hide"/>
                             <field name="rdl_diferencia_texto"/>
+                            <field name="rdl_precio_unitario"/>
+                            <field name="rdl_descuento"/>
+                            <field name="rdl_importe"/>
                             <field name="rdl_estado" column_invisible="1"/>
+                            <field name="rdl_ultimo" column_invisible="1"/>
+                            <field name="rdl_moneda_id" column_invisible="1"/>
                         </list>
                     </field>
+                    <group class="oe_subtotal_footer" name="rdl_total">
+                        <field name="rdl_total_escaneo"/>
+                    </group>
                 </page>
             </xpath>
         </field>
