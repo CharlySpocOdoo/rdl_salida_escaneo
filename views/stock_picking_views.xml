@@ -9,7 +9,6 @@
                  Solo existe en pantalla cuando la salida exige escaneo. -->
             <xpath expr="//notebook" position="before">
                 <field name="rdl_exige_escaneo" invisible="1"/>
-                <field name="rdl_estado_escaneo" invisible="1"/>
                 <field name="rdl_escaneos" invisible="1"/>
                 <field name="rdl_moneda_id" invisible="1"/>
                 <field name="_barcode_scanned" widget="barcode_handler" invisible="not rdl_exige_escaneo"/>
@@ -18,45 +17,34 @@
             <!-- La pestaña, como primera. -->
             <xpath expr="//notebook/page[1]" position="before">
                 <page string="Revisión por escaneo" name="rdl_revision_escaneo" invisible="not rdl_exige_escaneo">
-                    <div class="alert alert-secondary mb-2" role="status" invisible="rdl_estado_escaneo != 'sin_empezar'">
-                        <field name="rdl_letrero_escaneo" readonly="1" nolabel="1"/>
-                    </div>
-                    <div class="alert alert-warning mb-2" role="status" invisible="rdl_estado_escaneo != 'faltan'">
-                        <field name="rdl_letrero_escaneo" readonly="1" nolabel="1"/>
-                    </div>
-                    <div class="alert alert-danger mb-2" role="alert" invisible="rdl_estado_escaneo != 'sobran'">
-                        <field name="rdl_letrero_escaneo" readonly="1" nolabel="1"/>
-                    </div>
-                    <div class="alert alert-success mb-2" role="status" invisible="rdl_estado_escaneo != 'completa'">
-                        <field name="rdl_letrero_escaneo" readonly="1" nolabel="1"/>
+                    <!-- 1.0.3, conteo a ciegas (Charly, 2026-11-15): sin letrero de colores ni lo que dice la salida.
+                         Un letrero fijo y neutro. -->
+                    <div class="alert alert-secondary mb-2" role="status">
+                        Escanea o escribe el SKU de cada pieza y teclea lo que contaste.
                     </div>
                     <group>
                         <field name="rdl_sku" class="o_rdl_escribir_sku" placeholder="Escribe el SKU y presiona Enter"/>
                     </group>
-                    <!-- 1.0.2: widget propio (static/src/rdl_escaneo_lista.js) que lleva a la línea del último
-                         escaneado y regresa el cursor a «Escribir SKU»; limit 2000 para ver todos sin páginas. -->
+                    <!-- Widget propio (static/src/rdl_escaneo_lista.js): lleva a la línea del último escaneado (1.0.2),
+                         deja el cursor en su «Contado» y cuenta el lector aunque el cursor esté en «Contado» (1.0.3).
+                         limit 2000 para ver todos sin páginas. Conteo a ciegas (1.0.3): sin «Dice la salida», sin
+                         «Diferencia» y sin colores por estado; solo el amarillo del último escaneado. -->
                     <field name="rdl_linea_escaneo_ids" nolabel="1" widget="rdl_escaneo_one2many" class="o_rdl_escaneo_lista">
                         <list editable="bottom" create="false" delete="false" limit="2000"
-                              decoration-info="rdl_ultimo"
-                              decoration-success="rdl_estado == 'completo'"
-                              decoration-warning="rdl_estado == 'falta'"
-                              decoration-danger="rdl_estado == 'sobra'">
+                              decoration-info="rdl_ultimo">
                             <field name="product_id" readonly="1"/>
                             <field name="rdl_codigo_sku" readonly="1"/>
-                            <field name="rdl_esperado"/>
                             <field name="rdl_contado"/>
                             <field name="product_uom_id" readonly="1" optional="hide"/>
-                            <field name="rdl_diferencia_texto"/>
                             <field name="rdl_precio_unitario"/>
                             <field name="rdl_descuento"/>
                             <field name="rdl_importe"/>
-                            <field name="rdl_estado" column_invisible="1"/>
                             <field name="rdl_ultimo" column_invisible="1"/>
                             <field name="rdl_moneda_id" column_invisible="1"/>
                         </list>
                     </field>
                     <group class="oe_subtotal_footer" name="rdl_total">
-                        <field name="rdl_total_escaneo"/>
+                        <field name="rdl_total_escaneo" class="oe_subtotal_footer_separator"/>
                     </group>
                 </page>
             </xpath>

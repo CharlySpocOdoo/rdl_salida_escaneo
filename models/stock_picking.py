@@ -30,11 +30,13 @@ class StockPicking(models.Model):
     # 1.0.2 · Función 1: cuántos escaneos o SKU van en esta pantalla. Sube en cada intento; con eso la tabla sabe
     # que debe llevar a la línea marcada y regresar el cursor a «Escribir SKU». Sin guardar.
     rdl_escaneos = fields.Integer(string="Escaneos en pantalla", store=False)
-    # 1.0.2 · Función 2: la moneda de la orden de venta y el total de la revisión, sin IVA. Computados, sin guardar.
+    # 1.0.2 · Función 2: la moneda de la orden de venta y el total de la revisión. Computados, sin guardar.
+    # 1.0.4 (Charly, 2026-11-15: «la venta siempre trae ya el iva incluido así que no se necesita un subtotal solo el
+    # total de cada línea y el total de toda la orden»): un solo «Total», con IVA incluido.
     rdl_moneda_id = fields.Many2one("res.currency", string="Moneda de la venta", compute="_compute_rdl_moneda")
     rdl_total_escaneo = fields.Monetary(
         string="Total", currency_field="rdl_moneda_id", compute="_compute_rdl_total_escaneo",
-        help="Suma de los importes de la revisión por escaneo. Sin IVA.",
+        help="Suma de los importes de lo contado, con IVA incluido, como en la orden de venta.",
     )
 
     # ── Cuándo aplica ────────────────────────────────────────────────────────
@@ -88,19 +90,13 @@ class StockPicking(models.Model):
                 picking.rdl_letrero_escaneo = _("Sin empezar: escanea la primera pieza o escribe el SKU.")
             elif sobran:
                 picking.rdl_estado_escaneo = "sobran"
-                picking.rdl_letrero_escaneo = _(
-                    "Sobran %(piezas)s piezas de %(productos)s productos: corrige el contado antes de validar.",
-                    piezas=cantidad_texto(sum(q for _p, q in sobran)), productos=len(sobran),
-                )
+                picking.rdl_letrero_escaneo = _("En revisión.")
             elif faltan:
                 picking.rdl_estado_escaneo = "faltan"
-                picking.rdl_letrero_escaneo = _(
-                    "Faltan %(piezas)s piezas de %(productos)s productos.",
-                    piezas=cantidad_texto(sum(q for _p, q in faltan)), productos=len(faltan),
-                )
+                picking.rdl_letrero_escaneo = _("En revisión.")
             else:
                 picking.rdl_estado_escaneo = "completa"
-                picking.rdl_letrero_escaneo = _("Completa: %s piezas revisadas. Ya puedes validar.", cantidad_texto(total))
+                picking.rdl_letrero_escaneo = _("En revisión.")
 
     # ── 1.0.2 · Precio, descuento, importe y total (de la orden de venta) ────
 
@@ -110,38 +106,40 @@ class StockPicking(models.Model):
             # sudo solo para LEER la moneda de la venta: las despachadoras pueden no tener permiso de ventas.
             picking.rdl_moneda_id = picking.sudo().sale_id.currency_id or picking.company_id.currency_id
 
-    @api.depends("rdl_linea_escaneo_ids.rdl_importe")
+    @api.depends("rdl_linea_escaneo_ids.rdl_importe", "rdl_moneda_id")
     def _compute_rdl_total_escaneo(self):
+        """Total = suma de los importes, que ya vienen redondeados por renglón de venta con la moneda de la venta,
+        como el price_total de cada renglón. Se redondea otra vez solo para quitar el ruido de la suma de flotantes."""
         for picking in self:
-            picking.rdl_total_escaneo = sum(picking.rdl_linea_escaneo_ids.mapped("rdl_importe"))
+            total = sum(picking.rdl_linea_escaneo_ids.mapped("rdl_importe"))
+            picking.rdl_total_escaneo = picking.rdl_moneda_id.round(total) if picking.rdl_moneda_id else total
 
     @staticmethod
-    def _rdl_precio_sin_iva(linea_venta):
-        """El precio unitario del renglón de venta, sin IVA. Si sus impuestos vienen incluidos en el precio, se quitan;
-        si no, es price_unit tal cual. Solo para mostrar: si el cálculo de impuestos fallara, se usa price_unit y se
-        anota un aviso en el registro del servidor, para que la pantalla de la salida nunca se caiga por esto."""
-        # En Odoo 18 el campo es tax_id; la guarda es por si otra versión lo llama tax_ids.
-        campo = "tax_id" if "tax_id" in linea_venta._fields else "tax_ids"
-        impuestos = linea_venta[campo] if campo in linea_venta._fields else linea_venta.env["account.tax"]
-        if not impuestos or "price_include" not in impuestos._fields or not any(impuestos.mapped("price_include")):
-            return linea_venta.price_unit
-        try:
-            return impuestos.compute_all(
-                linea_venta.price_unit, currency=linea_venta.currency_id, quantity=1.0,
-                product=linea_venta.product_id, partner=linea_venta.order_id.partner_shipping_id,
-            )["total_excluded"]
-        except Exception:  # noqa: BLE001
-            _logger.warning("rdl_salida_escaneo: no se pudo quitar el IVA incluido del renglón de venta %s; "
-                            "se muestra price_unit.", linea_venta.id)
-            return linea_venta.price_unit
+    def _rdl_moneda_venta(linea_venta):
+        return linea_venta.currency_id or linea_venta.order_id.currency_id or linea_venta.company_id.currency_id
+
+    def _rdl_importe_de_tramo(self, linea_venta, cantidad_producto, producto):
+        """1.0.4: lo contado que le toca a un renglón de venta (en la unidad del producto) → su importe CON IVA
+        incluido, redondeado con la moneda de la venta. Es la cuenta del price_total de un renglón con el IVA incluido
+        en el precio: price_unit × (1 − desc/100) × cantidad en la unidad del renglón. Charly (2026-11-15): «la
+        orden de venta siempre trae el IVA incluido»."""
+        unidad_venta = linea_venta.product_uom or producto.uom_id
+        cantidad = producto.uom_id._compute_quantity(cantidad_producto, unidad_venta, round=False)
+        importe = linea_venta.price_unit * (1.0 - (linea_venta.discount or 0.0) / 100.0) * cantidad
+        moneda = self._rdl_moneda_venta(linea_venta)
+        return moneda.round(importe) if moneda else importe
 
     def _rdl_precios(self):
-        """Por producto: (precio unitario sin IVA en la unidad del producto, % descuento), de los renglones de la orden
-        de venta ligados a los movimientos de esta salida (move.sale_line_id). Si un producto viene de varios
-        renglones, promedio ponderado por la cantidad de cada movimiento, para precio y descuento. Los renglones de
-        venta se leen con sudo, SOLO para leer: aquí nunca se escribe en la venta."""
+        """Por producto: (precio unitario con IVA incluido en la unidad del producto, % descuento, tramos), de los renglones de
+        la orden de venta ligados a los movimientos de esta salida (move.sale_line_id).
+        - Precio y descuento, solo para mostrar: si un producto viene de varios renglones, promedio ponderado por la
+          cantidad de cada movimiento.
+        - Tramos: [(renglón de venta, cantidad que esta salida lleva de ese renglón, en la unidad del producto)], en
+          el orden de la venta. Con ellos se reparte lo contado para el importe.
+        Los renglones de venta se leen con sudo, SOLO para leer: aquí nunca se escribe en la venta."""
         self.ensure_one()
         acumulado = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0])   # peso, precio×peso, desc×peso, Σprecio, Σdesc, n
+        tramos = defaultdict(dict)                                       # producto → {renglón: cantidad}
         for move in self.move_ids:
             if move.state == "cancel" or not move.product_id:
                 continue
@@ -152,7 +150,8 @@ class StockPicking(models.Model):
             unidad_movimiento = move.product_uom or producto.uom_id
             peso = unidad_movimiento._compute_quantity(move.product_uom_qty, producto.uom_id, round=False)
             unidad_venta = linea_venta.product_uom or producto.uom_id
-            precio = unidad_venta._compute_price(self._rdl_precio_sin_iva(linea_venta), producto.uom_id)
+            precio = unidad_venta._compute_price(linea_venta.price_unit, producto.uom_id)   # 1.0.4: con IVA incluido
+            tramos[producto][linea_venta] = tramos[producto].get(linea_venta, 0.0) + peso
             a = acumulado[producto]
             a[0] += peso
             a[1] += precio * peso
@@ -163,9 +162,12 @@ class StockPicking(models.Model):
         precios = {}
         for producto, (peso, precio_peso, desc_peso, suma_precio, suma_desc, n) in acumulado.items():
             if peso > 0:
-                precios[producto] = (precio_peso / peso, desc_peso / peso)
+                precio, descuento = precio_peso / peso, desc_peso / peso
             else:                                   # cantidades en 0: promedio simple
-                precios[producto] = (suma_precio / n, suma_desc / n)
+                precio, descuento = suma_precio / n, suma_desc / n
+            orden = sorted(tramos[producto].items(),
+                           key=lambda par: (par[0].order_id.id, par[0].sequence or 0, par[0].id or 0))
+            precios[producto] = (precio, descuento, orden)
         return precios
 
     # ── Escanear y escribir el SKU ───────────────────────────────────────────
@@ -234,16 +236,23 @@ class StockPicking(models.Model):
 
     def _rdl_contar(self, productos, que, es_codigo):
         """Suma 1 al producto encontrado y regresa el aviso para la pantalla. 1.0.2: marca su línea como la última
-        escaneada (y desmarca la anterior) y sube rdl_escaneos en cada intento, para que la tabla lleve a esa línea y
-        el cursor regrese a «Escribir SKU»."""
+        escaneada (y desmarca la anterior) y sube rdl_escaneos en cada intento, para que la tabla lleve a esa línea.
+        1.0.3 (conteo a ciegas, Charly 2026-11-15): el aviso es neutro, «Contado: <producto>», sin cantidades ni si ya
+        está completo o sobra, para que no se sepa lo que dice la salida. «No encontrado», «Repetido» y «No está en
+        esta salida» se quedan: no dicen cantidades."""
         self.ensure_one()
         self.rdl_escaneos = (self.rdl_escaneos or 0) + 1
+        # 1.0.3: si no se cuenta (no encontrado, repetido, no está en la salida), ninguna línea queda marcada y el
+        # cursor va a «Escribir SKU», no al «Contado» de la línea anterior.
+        marcadas = self.rdl_linea_escaneo_ids.filtered("rdl_ultimo")
         if not productos:
+            marcadas.rdl_ultimo = False
             mensaje = _("%s no es de ningún producto. No se contó.", que)
             if es_codigo:
                 mensaje += " " + _("Escribe el SKU.")
             return self._rdl_aviso(_("No encontrado"), mensaje)
         if len(productos) > 1:
+            marcadas.rdl_ultimo = False
             return self._rdl_aviso(_("Repetido"), _(
                 "%(que)s lo tienen %(n)s productos (%(nombres)s). No se contó: corrígelo en Odoo.",
                 que=que, n=len(productos), nombres=", ".join(productos.mapped("display_name")),
@@ -251,6 +260,7 @@ class StockPicking(models.Model):
         producto = productos
         esperado = self._rdl_esperado()
         if producto not in esperado:
+            marcadas.rdl_ultimo = False
             return self._rdl_aviso(_("No está en esta salida"),
                                    _("%s no está en esta salida. No se contó.", producto.display_name))
         self._rdl_sincronizar_lineas()
@@ -259,26 +269,22 @@ class StockPicking(models.Model):
         for anterior in self.rdl_linea_escaneo_ids.filtered(lambda l: l.rdl_ultimo and l != linea):
             anterior.rdl_ultimo = False
         linea.rdl_ultimo = True
-        e, c = esperado[producto], linea.rdl_contado
-        cmp = float_compare(c, e, precision_rounding=producto.uom_id.rounding or 0.01)
-        if cmp > 0:
-            return self._rdl_aviso(_("Sobra"), _(
-                "%(producto)s: ya van %(c)s y la salida dice %(e)s. Sobran %(s)s: corrige el contado.",
-                producto=producto.display_name, c=cantidad_texto(c), e=cantidad_texto(e), s=cantidad_texto(c - e),
-            ))
-        if cmp == 0:
-            return self._rdl_aviso(_("Completo"), _("%s completo ✔", producto.display_name))
-        return self._rdl_aviso(_("Contado"), _("%(producto)s: %(c)s de %(e)s", producto=producto.display_name,
-                                              c=cantidad_texto(c), e=cantidad_texto(e)))
+        return self._rdl_aviso(_("Contado"), _("Contado: %s", producto.display_name))
 
     def on_barcode_scanned(self, barcode):
+        """Lo que escucha el «oído» del lector cuando el cursor no está en una casilla. 1.0.3: busca primero por código
+        de barras y, si no hay ninguno, por SKU."""
         if not self.rdl_exige_escaneo:
             return None
         codigo = (barcode or "").strip()
-        return self._rdl_contar(self._rdl_productos_por_codigo(codigo), _("El código %s", codigo), es_codigo=True)
+        productos = self._rdl_productos_por_codigo(codigo) or self._rdl_productos_por_sku(codigo)
+        return self._rdl_contar(productos, _("El código %s", codigo), es_codigo=True)
 
     @api.onchange("rdl_sku")
     def _onchange_rdl_sku(self):
+        """La casilla «Escribir SKU», a mano o con el lector (el lector teclea ahí cuando ahí está el cursor, y también
+        llega aquí lo que el lector teclea en «Contado»: lo manda el JS). 1.0.3: busca primero por SKU y, si no hay
+        ninguno, por código de barras, porque el lector lee códigos de barras."""
         texto = self.rdl_sku
         if not texto:
             return None
@@ -286,7 +292,8 @@ class StockPicking(models.Model):
         if not self.rdl_exige_escaneo:
             return None
         sku = texto.strip().upper()
-        return self._rdl_contar(self._rdl_productos_por_sku(sku), _("El SKU %s", sku), es_codigo=False)
+        productos = self._rdl_productos_por_sku(sku) or self._rdl_productos_por_codigo(texto.strip())
+        return self._rdl_contar(productos, _("El SKU %s", sku), es_codigo=False)
 
     # ── El bloqueo ───────────────────────────────────────────────────────────
 
@@ -299,12 +306,11 @@ class StockPicking(models.Model):
         partes = []
         if float_is_zero(total, precision_digits=4):
             partes.append(_("Todavía no se ha contado nada. Escanea las piezas en la pestaña «Revisión por escaneo»."))
-        else:
-            if faltan:
-                partes.append(_("Faltan: %s.", ", ".join(f"{cantidad_texto(q)} {p.display_name}" for p, q in faltan)))
-            if sobran:
-                partes.append(_("Sobran: %s. Corrige el contado.",
-                                ", ".join(f"{cantidad_texto(q)} {p.display_name}" for p, q in sobran)))
+        elif faltan or sobran:
+            # 1.0.3, conteo a ciegas (Charly 2026-11-15: «Sí, sin cantidades y que diga cuáles productos no
+            # coinciden»): solo los nombres, juntos y en orden alfabético, sin cantidades ni si falta o sobra.
+            nombres = sorted({p.display_name or "" for p, _q in faltan + sobran})
+            partes.append(_("No coincide lo contado. Vuelve a contar estos productos: %s.", ", ".join(nombres)))
         sin_apartar = self.move_ids.filtered(
             lambda m: m.state not in ("done", "cancel")
             and float_compare(m.quantity, m.product_uom_qty, precision_rounding=m.product_uom.rounding or 0.01) < 0

@@ -37,12 +37,12 @@ class RdlSalidaEscaneoLinea(models.Model):
     rdl_ultimo = fields.Boolean(string="Último escaneado", store=False)
 
     # 1.0.2 · Función 2: precio, descuento e importe, de los renglones de la orden de venta que generó la salida.
-    # Computados y sin guardar: se calculan al abrir la salida y al contar. Sin IVA.
+    # Computados y sin guardar: se calculan al abrir la salida y al contar. 1.0.4: con IVA incluido, como la venta.
     rdl_moneda_id = fields.Many2one("res.currency", string="Moneda", related="picking_id.rdl_moneda_id")
     rdl_precio_unitario = fields.Float(
         string="Precio unitario", digits="Product Price", compute="_compute_rdl_importe",
-        help="Sin IVA, por unidad del producto. Sale de la orden de venta; si el producto viene en varios renglones, "
-             "es el promedio ponderado por cantidad.",
+        help="El de la orden de venta, con IVA incluido, por unidad del producto. Si el producto viene en varios "
+             "renglones, es el promedio ponderado por cantidad.",
     )
     rdl_descuento = fields.Float(
         string="% Descuento", digits="Discount", compute="_compute_rdl_importe",
@@ -50,7 +50,8 @@ class RdlSalidaEscaneoLinea(models.Model):
     )
     rdl_importe = fields.Monetary(
         string="Importe", currency_field="rdl_moneda_id", compute="_compute_rdl_importe",
-        help="Contado × precio unitario × (1 − descuento / 100). Sin IVA.",
+        help="Lo contado × precio unitario × (1 − descuento / 100), con IVA incluido, redondeado con la moneda de la "
+             "venta. Si el producto viene de varios renglones de venta, se reparte lo contado entre ellos y se suma.",
     )
 
     _sql_constraints = [
@@ -89,16 +90,30 @@ class RdlSalidaEscaneoLinea(models.Model):
                  "picking_id.move_ids.sale_line_id.price_unit", "picking_id.move_ids.sale_line_id.discount",
                  "picking_id.move_ids.sale_line_id.product_uom")
     def _compute_rdl_importe(self):
+        """Lo contado se reparte entre los renglones de venta del producto, en el orden de la venta: a cada uno hasta
+        lo que esta salida lleva de él, y lo que sobre, al último (1.0.3). Cada tramo es el price_total de ese renglón
+        para esa cantidad, con IVA incluido (1.0.4). Así, si lo contado es igual a lo que pide la venta, el importe es
+        el de esos renglones."""
         por_salida = {}
         for linea in self:
-            precio = descuento = 0.0
-            if linea.product_id and len(linea.picking_id) == 1:
-                if linea.picking_id not in por_salida:
-                    por_salida[linea.picking_id] = linea.picking_id._rdl_precios()
-                precio, descuento = por_salida[linea.picking_id].get(linea.product_id, (0.0, 0.0))
+            precio = descuento = importe = 0.0
+            salida, producto = linea.picking_id, linea.product_id
+            if producto and len(salida) == 1:
+                if salida not in por_salida:
+                    por_salida[salida] = salida._rdl_precios()
+                precio, descuento, tramos = por_salida[salida].get(producto, (0.0, 0.0, []))
+                restante = linea.rdl_contado
+                for i, (linea_venta, capacidad) in enumerate(tramos):
+                    if restante <= 1e-9:
+                        break
+                    parte = restante if i == len(tramos) - 1 else min(restante, capacidad)
+                    if parte <= 1e-9:
+                        continue
+                    importe += salida._rdl_importe_de_tramo(linea_venta, parte, producto)
+                    restante -= parte
             linea.rdl_precio_unitario = precio
             linea.rdl_descuento = descuento
-            linea.rdl_importe = linea.rdl_contado * precio * (1.0 - descuento / 100.0)
+            linea.rdl_importe = importe
 
     @api.constrains("rdl_contado")
     def _check_rdl_contado(self):
